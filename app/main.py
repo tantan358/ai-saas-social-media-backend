@@ -11,7 +11,10 @@ from app.modules.scheduler.router import router as scheduler_router
 app = FastAPI(
     title="Nervia AI API",
     description="SaaS platform for AI-powered social media campaign management",
-    version="1.0.0"
+    version="1.0.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json"
 )
 
 # CORS middleware
