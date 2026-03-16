@@ -197,6 +197,13 @@ class CampaignService:
         return campaign
 
     @staticmethod
+    def delete_campaign(db: Session, campaign_id: str, agency_id: str) -> None:
+        """Delete a campaign and its related plans/posts (cascade). Fails if not found or wrong agency."""
+        campaign = CampaignService.get_campaign(db, campaign_id, agency_id)
+        db.delete(campaign)
+        db.commit()
+
+    @staticmethod
     def generate_plan(
         db: Session,
         campaign_id: str,

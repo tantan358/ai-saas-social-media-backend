@@ -72,6 +72,17 @@ def update_campaign(
     return CampaignService.update_campaign(db, campaign_id, agency_id, campaign_data)
 
 
+@router.delete("/{campaign_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_campaign(
+    campaign_id: str,
+    db: Session = Depends(get_db),
+    agency_id: str = Depends(get_current_agency_id),
+):
+    """Delete a campaign and its plans/posts. Returns 204 on success."""
+    CampaignService.delete_campaign(db, campaign_id, agency_id)
+    return None
+
+
 @router.get("/{campaign_id}/plan", response_model=GetPlanResponse)
 def get_plan(
     campaign_id: str,
