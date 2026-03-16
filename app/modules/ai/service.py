@@ -478,7 +478,11 @@ class AIService:
             allowed_platforms = set(options.channels)
             objectives = _compute_objectives_for_plan(options)
             for i, p in enumerate(posts):
-                validate_content_language(p.get("content", ""), language)
+                content_text = p.get("content", "")
+                validate_content_language(content_text, language)
+                # Enforce requested content length (short/medium/long) even when using external AI.
+                if isinstance(content_text, str) and content_text.strip():
+                    p["content"] = _content_by_length(content_text, options.content_length, language)
                 plat = (p.get("platform") or "").lower()
                 if plat not in allowed_platforms:
                     p["platform"] = options.channels[0]
