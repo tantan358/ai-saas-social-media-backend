@@ -15,11 +15,13 @@ def update_post(
     db: Session = Depends(get_db),
     agency_id: str = Depends(get_current_agency_id),
 ):
-    """Update post title and/or content. Sets status to edited. Locked after plan approval."""
+    """Update post title, content, hashtags, and/or link. Sets status to edited. Locked after plan approval."""
     return CampaignService.update_post(
         db,
         post_id,
         agency_id,
         title=data.title,
         content=data.content,
+        hashtags=data.hashtags,
+        link=data.link,
     )

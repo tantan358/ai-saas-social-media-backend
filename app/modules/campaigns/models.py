@@ -86,6 +86,8 @@ class Post(Base):
     week_number = Column(Integer, nullable=False)  # 1-4
     title = Column(String(500), nullable=True)
     content = Column(Text, nullable=False)
+    hashtags = Column(String(500), nullable=True)
+    link = Column(String(2048), nullable=True)
     status = Column(Enum(PostStatus), default=PostStatus.GENERATED, nullable=False)
     platform = Column(String(50))  # channel identifier from generation options (e.g. linkedin, instagram)
     content_objective = Column(String(50), nullable=True)  # lead_generation, education, etc.

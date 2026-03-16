@@ -90,6 +90,8 @@ class CampaignService:
                     content=p.content,
                     platform=p.platform,
                     status=p.status,
+                    hashtags=getattr(p, "hashtags", None),
+                    link=getattr(p, "link", None),
                     content_objective=getattr(p, "content_objective", None),
                 )
                 for p in posts
@@ -288,6 +290,8 @@ class CampaignService:
                     content=p.content,
                     platform=p.platform,
                     status=p.status,
+                    hashtags=getattr(p, "hashtags", None),
+                    link=getattr(p, "link", None),
                     content_objective=getattr(p, "content_objective", None),
                 )
                 for p in plan_posts
@@ -374,6 +378,8 @@ class CampaignService:
         agency_id: str,
         title: Optional[str] = None,
         content: Optional[str] = None,
+        hashtags: Optional[str] = None,
+        link: Optional[str] = None,
     ) -> Post:
         post = (
             db.query(Post)
@@ -403,6 +409,10 @@ class CampaignService:
             post.title = title
         if content is not None:
             post.content = content
+        if hashtags is not None:
+            post.hashtags = hashtags if hashtags.strip() else None
+        if link is not None:
+            post.link = link.strip() or None
         post.status = PostStatus.EDITED
         db.commit()
         db.refresh(post)

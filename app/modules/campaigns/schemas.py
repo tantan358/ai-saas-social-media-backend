@@ -76,6 +76,8 @@ class PostCreate(PostBase):
 class PostUpdate(BaseModel):
     title: Optional[str] = Field(None, max_length=500)
     content: Optional[str] = Field(None, min_length=1)
+    hashtags: Optional[str] = Field(None, max_length=500)
+    link: Optional[str] = Field(None, max_length=2048)
     status: Optional[PostStatus] = None
     scheduled_at: Optional[datetime] = None
 
@@ -85,6 +87,8 @@ class PostResponse(PostBase):
     monthly_plan_id: str
     week_number: int
     status: PostStatus
+    hashtags: Optional[str] = None
+    link: Optional[str] = None
     content_objective: Optional[str] = None
     approved_at: Optional[datetime] = None
     published_at: Optional[datetime] = None
@@ -129,6 +133,8 @@ class MonthlyPlanPost(BaseModel):
     content: str
     platform: Optional[str] = None
     status: PostStatus
+    hashtags: Optional[str] = None
+    link: Optional[str] = None
     content_objective: Optional[str] = None
 
 
