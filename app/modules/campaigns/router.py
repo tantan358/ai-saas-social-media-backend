@@ -8,6 +8,8 @@ from app.modules.campaigns.schemas import (
     CampaignResponse,
     CampaignDetailResponse,
     PostResponse,
+    GetPlanResponse,
+    GeneratePlanResponse,
 )
 from app.modules.campaigns.service import CampaignService
 from app.dependencies import get_current_user, get_current_agency_id
@@ -69,13 +71,23 @@ def update_campaign(
     return CampaignService.update_campaign(db, campaign_id, agency_id, campaign_data)
 
 
-@router.post("/{campaign_id}/generate-plan", response_model=CampaignResponse)
+@router.get("/{campaign_id}/plan", response_model=GetPlanResponse)
+def get_plan(
+    campaign_id: str,
+    db: Session = Depends(get_db),
+    agency_id: str = Depends(get_current_agency_id),
+):
+    """Get the monthly plan for a campaign (plan is null if none exists yet)."""
+    return CampaignService.get_plan(db, campaign_id, agency_id)
+
+
+@router.post("/{campaign_id}/generate-plan", response_model=GeneratePlanResponse)
 def generate_plan(
     campaign_id: str,
     db: Session = Depends(get_db),
     agency_id: str = Depends(get_current_agency_id),
 ):
-    """Generate AI monthly plan (4 weeks, 2-3 posts per week)."""
+    """Generate or regenerate AI monthly plan (4 weeks, 2-3 posts per week). Returns campaign + plan."""
     return CampaignService.generate_plan(db, campaign_id, agency_id)
 
 
@@ -87,6 +99,16 @@ def approve_plan(
 ):
     """Approve the monthly plan; all posts marked approved and editing locked."""
     return CampaignService.approve_plan(db, campaign_id, agency_id)
+
+
+@router.post("/{campaign_id}/reset-plan", response_model=CampaignResponse)
+def reset_plan(
+    campaign_id: str,
+    db: Session = Depends(get_db),
+    agency_id: str = Depends(get_current_agency_id),
+):
+    """Remove the current planning and generated posts; campaign returns to draft so user can generate again."""
+    return CampaignService.reset_plan(db, campaign_id, agency_id)
 
 
 @router.get("/{campaign_id}/posts", response_model=List[PostResponse])

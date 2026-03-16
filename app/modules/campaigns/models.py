@@ -10,6 +10,7 @@ from app.database import Base
 class CampaignStatus(str, enum.Enum):
     DRAFT = "draft"
     PLANNING_GENERATED = "planning_generated"
+    PLANNING_EDITING = "planning_editing"
     PLANNING_APPROVED = "planning_approved"
     # Legacy / future
     POSTS_GENERATED = "posts_generated"
@@ -36,6 +37,7 @@ class Campaign(Base):
     __tablename__ = "campaigns"
 
     id = Column(CHAR(36), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(CHAR(36), ForeignKey("tenants.id"), nullable=False, index=True)
     client_id = Column(CHAR(36), ForeignKey("clients.id"), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     description = Column(Text)
@@ -74,6 +76,9 @@ class Post(Base):
 
     id = Column(CHAR(36), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(CHAR(36), ForeignKey("tenants.id"), nullable=False, index=True)
+    campaign_id = Column(
+        CHAR(36), ForeignKey("campaigns.id"), nullable=True, index=True
+    )
     monthly_plan_id = Column(
         CHAR(36), ForeignKey("monthly_plans.id"), nullable=False, index=True
     )

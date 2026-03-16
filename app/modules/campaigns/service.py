@@ -6,6 +6,21 @@ from app.modules.campaigns.models import (
     CampaignStatus,
     PostStatus,
 )
+
+# Campaign statuses that allow AI monthly plan generation or regeneration (before approval/schedule/publish).
+ALLOWED_PLAN_GENERATION_STATUSES = frozenset({
+    CampaignStatus.DRAFT,
+    CampaignStatus.PLANNING_GENERATED,
+    CampaignStatus.PLANNING_EDITING,
+})
+
+# Campaign statuses that block "Reset Planning" (scheduled/published or later).
+RESET_PLAN_BLOCKED_STATUSES = frozenset({
+    CampaignStatus.SCHEDULED,
+    CampaignStatus.PUBLISHING,
+    CampaignStatus.COMPLETED,
+    CampaignStatus.CANCELLED,
+})
 from app.modules.campaigns.schemas import (
     CampaignCreate,
     CampaignUpdate,
@@ -87,8 +102,11 @@ class CampaignService:
         agency_id: str,
         user_id: str,
     ) -> Campaign:
-        _ensure_client_in_agency(db, campaign_data.client_id, agency_id)
+        client = _ensure_client_in_agency(db, campaign_data.client_id, agency_id)
+        # Get tenant_id from client's agency
+        tenant_id = client.agency.tenant_id
         campaign = Campaign(
+            tenant_id=tenant_id,
             name=campaign_data.name,
             description=campaign_data.description,
             language=campaign_data.language,
@@ -179,12 +197,23 @@ class CampaignService:
         campaign_id: str,
         agency_id: str,
     ) -> GeneratePlanResponse:
+        """
+        Generate or regenerate the AI monthly plan for a campaign.
+        When the campaign already has a non-approved plan, it is fully replaced:
+        existing MonthlyPlan(s) and their Post rows are deleted (cascade), then
+        a new plan and posts are created. Only one active plan per campaign;
+        GET plan and GET posts therefore return only the latest plan.
+        """
         campaign = CampaignService.get_campaign(db, campaign_id, agency_id)
-        if campaign.status != CampaignStatus.DRAFT:
+        if campaign.status not in ALLOWED_PLAN_GENERATION_STATUSES:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Campaign must be in draft status to generate a plan",
+                detail="Approved planning cannot be regenerated directly. Reset or reopen planning first.",
             )
+        # Full replacement: delete existing plan(s) and their posts (cascade); old data is removed, not archived.
+        for existing_plan in list(campaign.monthly_plans):
+            db.delete(existing_plan)
+        db.flush()
         try:
             raw_posts = AIService.generate_monthly_plan_posts(
                 campaign_name=campaign.name,
@@ -206,6 +235,7 @@ class CampaignService:
         for p in raw_posts:
             post = Post(
                 tenant_id=tenant_id,
+                campaign_id=campaign.id,
                 monthly_plan_id=plan.id,
                 week_number=p.get("week_number", 1),
                 title=p.get("title"),
@@ -251,7 +281,10 @@ class CampaignService:
         agency_id: str,
     ) -> Campaign:
         campaign = CampaignService.get_campaign(db, campaign_id, agency_id)
-        if campaign.status != CampaignStatus.PLANNING_GENERATED:
+        if campaign.status not in (
+            CampaignStatus.PLANNING_GENERATED,
+            CampaignStatus.PLANNING_EDITING,
+        ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Campaign must have a generated plan to approve",
@@ -263,6 +296,31 @@ class CampaignService:
             for post in plan.posts:
                 post.status = PostStatus.APPROVED
                 post.approved_at = now
+        db.commit()
+        db.refresh(campaign)
+        return campaign
+
+    @staticmethod
+    def reset_plan(
+        db: Session,
+        campaign_id: str,
+        agency_id: str,
+    ) -> Campaign:
+        """
+        Remove the campaign's monthly plan and all generated posts; set status to DRAFT.
+        Not allowed when campaign is scheduled, publishing, or completed.
+        """
+        campaign = CampaignService.get_campaign(db, campaign_id, agency_id)
+        if campaign.status in RESET_PLAN_BLOCKED_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reset planning is not allowed when the campaign is scheduled or published.",
+            )
+        for existing_plan in list(campaign.monthly_plans):
+            db.delete(existing_plan)
+        campaign.status = CampaignStatus.DRAFT
+        campaign.approved_at = None
+        db.flush()
         db.commit()
         db.refresh(campaign)
         return campaign
@@ -310,6 +368,8 @@ class CampaignService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Editing is locked after plan approval",
             )
+        if campaign.status == CampaignStatus.PLANNING_GENERATED:
+            campaign.status = CampaignStatus.PLANNING_EDITING
         if title is not None:
             post.title = title
         if content is not None:

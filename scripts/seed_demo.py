@@ -18,8 +18,12 @@ from app.modules.auth.models import User
 from app.modules.tenants.models import Tenant
 from app.modules.tenants.service import TenantService
 from app.modules.tenants.schemas import TenantCreate
+from app.modules.agencies.models import Agency
 from app.modules.campaigns.service import CampaignService
 from app.modules.campaigns.schemas import CampaignCreate
+from app.modules.clients.models import Client
+from app.modules.clients.service import ClientService
+from app.modules.clients.schemas import ClientCreate
 from app.modules.auth.security import get_password_hash
 
 
@@ -57,6 +61,25 @@ def seed_demo():
             tenant = TenantService.create_tenant(db, tenant_data)
             print(f"✅ Tenant created: {tenant.name} (ID: {tenant.id})")
         
+        # Get or create agency for this tenant
+        agency = db.query(Agency).filter(
+            Agency.tenant_id == tenant.id,
+            Agency.slug == tenant.slug,
+        ).first()
+        if not agency:
+            agency = Agency(
+                tenant_id=tenant.id,
+                name=tenant.name,
+                slug=tenant.slug,
+                is_active=True,
+            )
+            db.add(agency)
+            db.commit()
+            db.refresh(agency)
+            print(f"✅ Agency created: {agency.name} (ID: {agency.id})")
+        else:
+            print(f"⚠️  Agency '{agency.name}' already exists, using existing agency...")
+        
         # Check if user exists
         user = db.query(User).filter(User.email == owner_data.email).first()
         if user:
@@ -64,6 +87,8 @@ def seed_demo():
             # Update password
             user.hashed_password = get_password_hash(owner_data.password)
             user.full_name = owner_data.full_name
+            if user.agency_id is None:
+                user.agency_id = agency.id
             db.commit()
             db.refresh(user)
             print(f"✅ User updated: {user.email} (ID: {user.id})")
@@ -76,7 +101,8 @@ def seed_demo():
                 hashed_password=hashed_password,
                 full_name=owner_data.full_name,
                 role=UserRole.ADMIN,
-                tenant_id=tenant.id
+                tenant_id=tenant.id,
+                agency_id=agency.id,
             )
             db.add(user)
             db.commit()
@@ -105,15 +131,24 @@ def seed_demo():
         print(refresh_token)
         print()
         
+        # Get or create demo client for the agency
+        client = db.query(Client).filter(Client.agency_id == agency.id).first()
+        if not client:
+            client = ClientService.create(db, agency.id, ClientCreate(name="Demo Client"))
+            print(f"✅ Client created: {client.name} (ID: {client.id})")
+        else:
+            print(f"⚠️  Client '{client.name}' already exists, using existing client...")
+        
         # Create a demo campaign
         print("Creating demo campaign...")
         campaign_data = CampaignCreate(
             name="Welcome Campaign",
             description="Demo campaign to get started",
-            language="es"
+            language="es",
+            client_id=client.id,
         )
         campaign = CampaignService.create_campaign(
-            db, campaign_data, tenant.id, user.id
+            db, campaign_data, agency.id, user.id
         )
         print(f"✅ Campaign created: {campaign.name} (ID: {campaign.id})")
         print()

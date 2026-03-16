@@ -94,3 +94,36 @@ class ApprovalResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# --- Monthly plan (get plan / generate plan) ---
+# MonthlyPlanPost: slim post shape when nested inside a plan (no monthly_plan_id, timestamps, etc.).
+# PostResponse is the full post; nothing in schemas.py previously did this nested shape.
+class MonthlyPlanPost(BaseModel):
+    id: str
+    week_number: int
+    title: Optional[str] = None
+    content: str
+    platform: Optional[str] = None
+    status: PostStatus
+
+
+# MonthlyPlanResponse: a plan with its posts. No existing schema represented a monthly plan.
+class MonthlyPlanResponse(BaseModel):
+    id: str
+    campaign_id: str
+    posts: List[MonthlyPlanPost]
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
+# GetPlanResponse: used when returning current plan (plan may be null). Not in schemas before.
+class GetPlanResponse(BaseModel):
+    plan: Optional[MonthlyPlanResponse] = None
+
+
+# GeneratePlanResponse: response of generate-plan endpoint (campaign + new plan + mode).
+class GeneratePlanResponse(BaseModel):
+    campaign: CampaignResponse
+    plan: MonthlyPlanResponse
+    generation_mode: str

@@ -1,6 +1,10 @@
-from fastapi import FastAPI
+import logging
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 from app.modules.auth.router import router as auth_router
 from app.modules.tenants.router import router as tenants_router
 from app.modules.agencies.router import router as agencies_router
@@ -53,6 +57,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+def log_unhandled_exception(request, exc: Exception):
+    """Log every unhandled exception with full traceback so 500s are visible in backend logs."""
+    if isinstance(exc, HTTPException):
+        raise exc
+    logger.exception(
+        "Unhandled exception: %s",
+        exc,
+        exc_info=True,
+        extra={"path": getattr(request, "url", None) and str(request.url.path)},
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+    )
+
 
 # Include routers
 app.include_router(auth_router, prefix="/api")
