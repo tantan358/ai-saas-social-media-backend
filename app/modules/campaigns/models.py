@@ -87,7 +87,8 @@ class Post(Base):
     title = Column(String(500), nullable=True)
     content = Column(Text, nullable=False)
     status = Column(Enum(PostStatus), default=PostStatus.GENERATED, nullable=False)
-    platform = Column(String(50))  # linkedin, instagram
+    platform = Column(String(50))  # channel identifier from generation options (e.g. linkedin, instagram)
+    content_objective = Column(String(50), nullable=True)  # lead_generation, education, etc.
     approved_at = Column(DateTime(timezone=True), nullable=True)
     scheduled_at = Column(DateTime(timezone=True))
     published_at = Column(DateTime(timezone=True))

@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, TYPE_CHECKING
+from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from app.config import settings
 import requests
 import json
@@ -6,6 +6,8 @@ import re
 
 if TYPE_CHECKING:
     from app.modules.campaigns.schemas import GenerationOptions
+
+from app.modules.campaigns.constants import ALLOWED_CHANNELS
 
 
 # Words that indicate wrong language (simple heuristic)
@@ -31,46 +33,29 @@ def validate_content_language(content: str, expected_language: str) -> None:
 # -----------------------------------------------------------------------------
 # Channel distribution algorithm (monthly post generation)
 # -----------------------------------------------------------------------------
-# Inputs:
-#   - channels: ["linkedin"], ["instagram"], or ["linkedin", "instagram"]
-#   - distribution_strategy: "balanced" | "linkedin_priority" | "instagram_priority"
-#   - n: posts per week (3–7)
-#
-# Rules:
-#   1. Single channel: all n posts assigned to that channel.
-#   2. Two channels:
-#      - balanced: round-robin (L,I,L,I,...) so counts differ by at most 1.
-#      - linkedin_priority: ceil(n/2) to LinkedIn, rest to Instagram.
-#      - instagram_priority: ceil(n/2) to Instagram, rest to LinkedIn.
-#   3. Odd n (5, 7): priority strategy gives (n+1)//2 to priority channel.
-#   4. Every generated post has an explicit "platform" field (linkedin | instagram).
+# Inputs come from GenerationOptions (channels list and posts_per_channel_per_week).
+# Channels are any supported identifiers from ALLOWED_CHANNELS; the generator
+# does not assume a fixed set. Each post has an explicit "platform" field set
+# to one of options.channels. Order of posts follows _week_posts_spec: all
+# slots for channel A, then all for channel B, etc.
 # -----------------------------------------------------------------------------
 
 
-def _platform_sequence_for_week(options: "GenerationOptions", n: int) -> List[str]:
+def _week_posts_spec(options: "GenerationOptions") -> List[tuple]:
     """
-    Return list of n platform names for one week.
-    Single channel -> all that channel. Two channels -> by distribution_strategy.
-    Multiple posts per channel in the same week are allowed.
+    Return for one week a list of (platform, slot_key) in order: all posts for
+    each channel in options.channels (with compressed slots per channel).
+    Supports up to 7 posts per channel; total per week = sum(posts_per_channel_per_week).
     """
-    channels = list(options.channels)
-    if len(channels) == 1:
-        return [channels[0]] * n
-    strat = options.distribution_strategy
-    if strat == "linkedin_priority":
-        first = "linkedin" if "linkedin" in channels else channels[0]
-        second = next(c for c in channels if c != first)
-        n_first = (n + 1) // 2
-        n_second = n - n_first
-        return [first] * n_first + [second] * n_second
-    if strat == "instagram_priority":
-        first = "instagram" if "instagram" in channels else channels[0]
-        second = next(c for c in channels if c != first)
-        n_first = (n + 1) // 2
-        n_second = n - n_first
-        return [first] * n_first + [second] * n_second
-    # balanced: round-robin so counts are as even as possible
-    return [channels[i % len(channels)] for i in range(n)]
+    out: List[tuple] = []
+    for channel in options.channels:
+        n = options.posts_per_channel_per_week.get(channel, 1)
+        n = max(1, min(7, n))
+        slot_indices = _get_weekly_slot_indices(n)
+        for i in range(n):
+            slot_key = WEEKLY_STRUCTURE_SLOTS[slot_indices[i]]
+            out.append((channel, slot_key))
+    return out
 
 
 def _content_by_length(base: str, length: str, language: str) -> str:
@@ -118,12 +103,51 @@ SLOT_TO_GOALS: Dict[str, List[str]] = {
     "conversion_cta": ["conversions", "sales"],
 }
 
+# Slot -> content objective (for objective_mode=mixed storage)
+SLOT_TO_OBJECTIVE: Dict[str, str] = {
+    "education": "education",
+    "lead_attraction": "lead_generation",
+    "product_benefit": "product_promotion",
+    "use_case": "positioning",
+    "brand_authority": "brand_authority",
+    "service_promotion": "product_promotion",
+    "conversion_cta": "conversion",
+}
+
+WEEKDAY_ORDER = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+
+def _compute_objectives_for_plan(options: "GenerationOptions") -> List[str]:
+    """
+    Return content_objective for each post in the same order as generated (week 1..4, then spec order).
+    Used for mixed / by_day / by_post; result length = 4 * len(_week_posts_spec(options)).
+    """
+    spec = _week_posts_spec(options)
+    total_per_week = len(spec)
+    total_posts = 4 * total_per_week
+    objectives: List[str] = []
+    for i in range(total_posts):
+        slot_in_week = i % total_per_week
+        platform, slot_key = spec[slot_in_week]
+        mode = getattr(options, "objective_mode", "mixed") or "mixed"
+        if mode == "mixed":
+            obj = SLOT_TO_OBJECTIVE.get(slot_key, "education")
+        elif mode == "by_day":
+            by_day = getattr(options, "objective_by_day", None) or {}
+            day = WEEKDAY_ORDER[slot_in_week] if slot_in_week < len(WEEKDAY_ORDER) else WEEKDAY_ORDER[-1]
+            obj = by_day.get(day, "education")
+        else:  # by_post
+            by_post = getattr(options, "objective_by_post", None) or ["education"]
+            obj = by_post[i % len(by_post)]
+        objectives.append(obj)
+    return objectives
+
 
 def _get_weekly_slot_indices(n_posts: int) -> List[int]:
     """
-    Return which of the 7 canonical slots to use when generating n_posts per week.
+    Return which of the 7 canonical slots to use when generating n_posts (e.g. per channel).
     Compresses the full week structure logically: spans funnel from education to CTA.
-    n_posts in [3, 7]; result length = n_posts.
+    n_posts in [1, 7]; result length = n_posts.
     """
     if n_posts >= 7:
         return list(range(7))
@@ -205,29 +229,31 @@ def _build_monthly_generation_system_prompt(
     language_code: str,
     channels_str: str,
     distribution_strategy: str,
-    n_per_week: int,
+    posts_per_channel_per_week: Dict[str, int],
+    total_per_week: int,
     total_posts: int,
     week_structure_desc: str,
     goals_str: str,
     length_instruction: str,
     call_to_action_required: bool,
+    objective_instruction: Optional[str] = None,
+    example_platform: Optional[str] = None,
 ) -> str:
     cta_rule = (
         " Include a clear, varied call-to-action (CTA) in every post."
         if call_to_action_required
         else " For the Conversion/CTA slot only, include a soft or strong CTA; other posts may omit CTA."
     )
+    per_channel_desc = "; ".join(
+        f"{ch}: {n} posts/week" for ch, n in sorted(posts_per_channel_per_week.items())
+    )
     return f"""You are an expert social media content planner. Your task is to generate a full monthly content plan.
 
 ## CRITICAL RULES (must follow)
 
-1. **Exact volume**: Generate exactly {n_per_week} posts per week for 4 weeks. Total posts must be exactly {total_posts}. Do not output fewer or more.
+1. **Exact volume per channel**: Each week must have exactly these posts per platform: {per_channel_desc}. Total per week = {total_per_week}. For 4 weeks, total posts = {total_posts}. Do not output fewer or more.
 
-2. **Channels and distribution**: Use only these platforms: {channels_str}. Apply a **{distribution_strategy}** distribution:
-   - balanced: assign platforms in round-robin so each channel gets roughly half the posts per week.
-   - linkedin_priority: assign more posts to linkedin than to instagram each week (e.g. 4 linkedin / 3 instagram when n=7).
-   - instagram_priority: assign more posts to instagram than to linkedin each week.
-   Multiple posts per channel in the same week are required when n > 2.
+2. **Channels**: Use only these platforms: {channels_str}. Each channel gets its own count per week (up to 7 per channel). Multiple posts per channel in the same week are required when the count for that channel is > 1.
 
 3. **Marketing goals**: Campaign goals are: {goals_str}. Vary the goals across posts: each post must have a single **campaign_goal_tag** from this list. Rotate goals so the mix is balanced over the month; do not cluster the same goal in one week.
 
@@ -246,6 +272,12 @@ def _build_monthly_generation_system_prompt(
 {week_structure_desc}
 
 Each post must match its slot theme (Education, Lead attraction, etc.). Post 1 = first slot, Post 2 = second slot, and so on.
+""" + (
+    f"""
+
+9. **Content objective**: {objective_instruction}
+""" if objective_instruction else ""
+) + f"""
 
 ## Output format
 
@@ -258,8 +290,8 @@ Return a single JSON array of post objects. Each object must have these keys:
 - link (string or null; empty string or null if no link)
 - campaign_goal_tag (string; one of: {goals_str})
 
-Example shape for one post:
-{{"week_number": 1, "platform": "linkedin", "title": "...", "content": "...", "hashtags": ["#Tag1", "#Tag2"], "link": "", "campaign_goal_tag": "awareness"}}
+Example shape for one post (use one of the platform names from the list above):
+{{\"week_number\": 1, \"platform\": \"{example_platform or "linkedin"}\", \"title\": \"...\", \"content\": \"...\", \"hashtags\": [\"#Tag1\", \"#Tag2\"], \"link\": \"\", \"campaign_goal_tag\": \"awareness\"}}
 
 Generate the full array of {total_posts} posts. No commentary, only the JSON array."""
 
@@ -297,23 +329,19 @@ class AIService:
         options: "GenerationOptions",
     ) -> List[Dict[str, Any]]:
         """
-        Mock: 4 weeks, structured by weekly_structure. Each week uses n_posts slots
-        (full 7 or compressed). Titles/variety by slot; CTA on conversion_cta or when requested.
+        Mock: 4 weeks, per-channel limits (up to 7 per channel, 14 total/week).
+        Each channel gets its own compressed weekly structure; titles/variety by slot.
         """
         posts = []
         language = options.language
-        n_per_week = options.posts_per_week
-        slot_indices = _get_weekly_slot_indices(n_per_week)
+        spec = _week_posts_spec(options)
+        objectives = _compute_objectives_for_plan(options)
 
         for week in range(1, 5):
             week_0 = week - 1
-            platforms = _platform_sequence_for_week(options, n_per_week)
-
-            for i in range(n_per_week):
-                slot_idx = slot_indices[i]
-                slot_key = WEEKLY_STRUCTURE_SLOTS[slot_idx]
-                title = _pick_title_for_slot(slot_key, language, week_0, i)
-                platform = platforms[i]
+            for post_idx, (platform, slot_key) in enumerate(spec):
+                global_idx = (week - 1) * len(spec) + post_idx
+                title = _pick_title_for_slot(slot_key, language, week_0, post_idx)
 
                 if language == "es":
                     body = (
@@ -352,6 +380,7 @@ class AIService:
                     "hashtags": ["#MarketingDigital", "#SocialMedia"],
                     "link": "",
                     "campaign_goal_tag": goal_tag,
+                    "content_objective": objectives[global_idx] if global_idx < len(objectives) else "education",
                 })
         return posts
 
@@ -361,7 +390,7 @@ class AIService:
         description: str,
         options: "GenerationOptions",
     ) -> List[Dict[str, Any]]:
-        """Call OpenAI-style API to generate 4 weeks of posts; prompt enforces volume, distribution, and structured output."""
+        """Call OpenAI-style API to generate 4 weeks of posts; prompt enforces per-channel volume and structured output."""
         language = options.language
         lang_label = "Spanish" if language == "es" else "English"
         channels_str = ", ".join(options.channels)
@@ -370,29 +399,50 @@ class AIService:
             "medium": "2-4 sentences",
             "long": "4-6 sentences or short paragraphs",
         }.get(options.content_length, "2-4 sentences")
-        n_per_week = options.posts_per_week
-        total_posts = 4 * n_per_week
-        slot_indices = _get_weekly_slot_indices(n_per_week)
+        per_channel = options.posts_per_channel_per_week
+        total_per_week = sum(per_channel.values())
+        total_posts = 4 * total_per_week
         slot_names = [
             "Education", "Lead attraction", "Product benefit", "Use case",
             "Brand authority", "Service promotion", "Conversion / CTA",
         ]
-        week_structure_desc = "; ".join(
-            f"Post {i+1}: {slot_names[slot_indices[i]]}" for i in range(n_per_week)
-        )
+        parts = []
+        for ch in options.channels:
+            n = per_channel.get(ch, 1)
+            slot_indices = _get_weekly_slot_indices(n)
+            theme_list = ", ".join(slot_names[slot_indices[i]] for i in range(n))
+            parts.append(f"{ch.capitalize()}: {n} posts ({theme_list})")
+        week_structure_desc = ". ".join(parts)
         goals_str = ", ".join(options.campaign_goal_mix) if options.campaign_goal_mix else "awareness, engagement"
+
+        objective_instruction: Optional[str] = None
+        if getattr(options, "objective_mode", None) == "by_day" and getattr(options, "objective_by_day", None):
+            by_day = options.objective_by_day
+            objective_instruction = "Content objective by day of week: " + ", ".join(
+                f"{d}= {o}" for d, o in sorted(by_day.items())
+            ) + ". Align each post with its day's objective."
+        elif getattr(options, "objective_mode", None) == "by_post" and getattr(options, "objective_by_post", None):
+            n = len(options.objective_by_post)
+            objective_instruction = (
+                f"Content objective per post (in slot order, repeating every {n} slots): "
+                + ", ".join(f"slot {i+1}= {o}" for i, o in enumerate(options.objective_by_post))
+                + ". Align each post with its slot's objective."
+            )
 
         system = _build_monthly_generation_system_prompt(
             lang_label=lang_label,
             language_code=language,
             channels_str=channels_str,
             distribution_strategy=options.distribution_strategy,
-            n_per_week=n_per_week,
+            posts_per_channel_per_week=per_channel,
+            total_per_week=total_per_week,
             total_posts=total_posts,
             week_structure_desc=week_structure_desc,
             goals_str=goals_str,
             length_instruction=length_instruction,
             call_to_action_required=options.call_to_action_required,
+            objective_instruction=objective_instruction,
+            example_platform=options.channels[0] if options.channels else None,
         )
         user = _build_monthly_generation_user_prompt(
             campaign_name=campaign_name,
@@ -412,7 +462,7 @@ class AIService:
                 url,
                 headers={"Authorization": f"Bearer {settings.AI_API_KEY}"},
                 json=payload,
-                timeout=120,
+                timeout=180,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -426,7 +476,8 @@ class AIService:
                     text = text[4:]
             posts = json.loads(text)
             allowed_platforms = set(options.channels)
-            for p in posts:
+            objectives = _compute_objectives_for_plan(options)
+            for i, p in enumerate(posts):
                 validate_content_language(p.get("content", ""), language)
                 plat = (p.get("platform") or "").lower()
                 if plat not in allowed_platforms:
@@ -438,6 +489,8 @@ class AIService:
                     p["hashtags"] = []
                 if "campaign_goal_tag" not in p:
                     p["campaign_goal_tag"] = options.campaign_goal_mix[0] if options.campaign_goal_mix else "engagement"
+                # Preserve assigned content objective (by slot order)
+                p["content_objective"] = objectives[i] if i < len(objectives) else "education"
             return posts
         except (requests.RequestException, json.JSONDecodeError, ValueError):
             return AIService._generate_mock(campaign_name, description, options)
@@ -472,12 +525,13 @@ class AIService:
         campaign_plan: Dict[str, Any],
         language: str = "es",
     ) -> List[Dict[str, Any]]:
-        """Legacy: returns mock posts from plan."""
+        """Legacy: returns mock posts from plan. Platform round-robins over supported channels."""
         posts = []
         content_themes = campaign_plan.get("content_themes", [])
         posts_count = campaign_plan.get("posts_count", 5)
+        channel_list = sorted(ALLOWED_CHANNELS)
         for i, theme in enumerate(content_themes[:posts_count]):
-            platform = "linkedin" if i % 2 == 0 else "instagram"
+            platform = channel_list[i % len(channel_list)] if channel_list else "linkedin"
             if language == "es":
                 content = (
                     f"🎯 {theme}\n\n"

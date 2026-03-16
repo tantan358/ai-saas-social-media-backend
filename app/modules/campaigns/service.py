@@ -90,6 +90,7 @@ class CampaignService:
                     content=p.content,
                     platform=p.platform,
                     status=p.status,
+                    content_objective=getattr(p, "content_objective", None),
                 )
                 for p in posts
             ],
@@ -259,6 +260,7 @@ class CampaignService:
                 content=p.get("content", ""),
                 platform=p.get("platform"),
                 status=PostStatus.GENERATED,
+                content_objective=p.get("content_objective"),
                 extra_data=extra if extra else None,
             )
             db.add(post)
@@ -279,6 +281,7 @@ class CampaignService:
                     content=p.content,
                     platform=p.platform,
                     status=p.status,
+                    content_objective=getattr(p, "content_objective", None),
                 )
                 for p in plan_posts
             ],
