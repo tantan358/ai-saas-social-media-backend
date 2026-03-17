@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, date, time
 from app.modules.campaigns.models import CampaignStatus, PostStatus
 from app.modules.campaigns.constants import (
     ALLOWED_CHANNELS,
@@ -91,6 +91,9 @@ class PostResponse(PostBase):
     link: Optional[str] = None
     content_objective: Optional[str] = None
     approved_at: Optional[datetime] = None
+    scheduled_date: Optional[date] = None
+    scheduled_time: Optional[time] = None
+    scheduling_window_id: Optional[str] = None
     published_at: Optional[datetime] = None
     published_post_id: Optional[str] = None
     extra_data: Optional[Dict[str, Any]] = None
@@ -149,6 +152,8 @@ class MonthlyPlanResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
     generation_config: Optional[Dict[str, Any]] = None
+    total_posts: Optional[int] = None
+    distribution_json: Optional[List[int]] = None
 
 
 class ChannelConfig(BaseModel):
@@ -377,6 +382,124 @@ def resolve_generation_options(
 # GetPlanResponse: used when returning current plan (plan may be null). Not in schemas before.
 class GetPlanResponse(BaseModel):
     plan: Optional[MonthlyPlanResponse] = None
+
+
+# Schedule campaign: optional plan start date (first day of plan month).
+class ScheduleCampaignRequest(BaseModel):
+    plan_start_date: Optional[date] = Field(
+        None,
+        description="First day of the plan month (e.g. 2026-04-01). If omitted, first day of next month is used.",
+    )
+
+
+# Response from POST .../schedule: assigned count and schedule grouped by week.
+class ScheduleCampaignResponse(BaseModel):
+    campaign_id: str
+    assigned_count: int
+    plan_start_date: Optional[str] = None
+    schedule_by_week: Dict[str, Any] = Field(default_factory=dict)
+
+
+# --- Schedule-auto: response grouped by week and by date ---
+class ScheduleItemResponse(BaseModel):
+    post_id: str
+    platform: Optional[str] = None
+    title: Optional[str] = None
+    status: str
+    scheduled_at: str
+    scheduled_date: Optional[str] = None
+    day_of_week: Optional[str] = None
+
+
+class ScheduleByDateResponse(BaseModel):
+    date: str  # ISO date
+    posts: List[ScheduleItemResponse] = Field(default_factory=list)
+
+
+class ScheduleByWeekResponse(BaseModel):
+    week: int
+    by_date: List[ScheduleByDateResponse] = Field(default_factory=list, alias="by_date")
+
+    class Config:
+        populate_by_name = True
+
+
+class ScheduleAutoResponse(BaseModel):
+    campaign_id: str
+    assigned_count: int
+    plan_start_date: Optional[str] = None
+    by_week: List[ScheduleByWeekResponse] = Field(default_factory=list)
+    by_date: List[ScheduleByDateResponse] = Field(default_factory=list)
+
+
+# --- Manual post schedule (PUT /posts/{id}/schedule) ---
+class PostScheduleUpdate(BaseModel):
+    scheduled_date: date
+    scheduled_time: time
+    scheduling_note: Optional[str] = Field(None, max_length=500)
+
+
+# --- Publication windows ---
+class PublicationWindowCreate(BaseModel):
+    platform: str = Field(..., pattern="^(linkedin|instagram)$")
+    day_of_week: str = Field(
+        ...,
+        pattern="^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)$",
+    )
+    start_time: time
+    end_time: time
+    priority: int = Field(1, ge=0, le=10)
+    is_active: bool = True
+
+
+class PublicationWindowBulkCreate(BaseModel):
+    windows: List[PublicationWindowCreate] = Field(..., min_length=1, max_length=50)
+
+
+class PublicationWindowResponse(BaseModel):
+    id: str
+    campaign_id: str
+    platform: str
+    day_of_week: str
+    start_time: time
+    end_time: time
+    priority: int
+    is_active: bool
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+# --- Calendar (GET /campaigns/{id}/calendar) ---
+class CalendarPostItem(BaseModel):
+    post_id: str
+    platform: Optional[str] = None
+    title: Optional[str] = None
+    status: str
+    week_number: int
+    scheduled_at: Optional[str] = None
+    scheduled_date: Optional[str] = None
+    client_name: Optional[str] = None
+    campaign_name: Optional[str] = None
+
+
+class CalendarByDate(BaseModel):
+    date: str
+    posts: List[CalendarPostItem] = Field(default_factory=list)
+
+
+class CalendarByWeek(BaseModel):
+    week: int
+    by_date: List[CalendarByDate] = Field(default_factory=list)
+
+
+class CampaignCalendarResponse(BaseModel):
+    campaign_id: str
+    campaign_name: Optional[str] = None
+    client_name: Optional[str] = None
+    by_week: List[CalendarByWeek] = Field(default_factory=list)
+    by_date: List[CalendarByDate] = Field(default_factory=list)
 
 
 # GeneratePlanResponse: response of generate-plan endpoint (campaign + new plan + mode).

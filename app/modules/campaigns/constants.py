@@ -19,6 +19,13 @@ from typing import List, Dict, Tuple
 # Order is used for default config and round-robin when no order is specified.
 ALLOWED_CHANNELS = frozenset({"linkedin", "instagram"})
 
+# --- Balanced weekly distribution (Milestone 3) ---
+WEEKS_PER_PLAN = 4
+MIN_POSTS_PER_WEEK_DEFAULT = 3
+MAX_POSTS_PER_WEEK_DEFAULT = 5
+SCHEDULING_MODE_MANUAL = "manual"
+SCHEDULING_MODE_AUTO_WINDOWED = "auto_windowed"
+
 # Default posts per week per channel when no request channels are provided.
 DEFAULT_POSTS_PER_CHANNEL_PER_WEEK = 4
 
@@ -36,3 +43,23 @@ def get_default_channels_config() -> Tuple[List[str], Dict[str, int]]:
     names = sorted(ALLOWED_CHANNELS)
     per_channel = {c: DEFAULT_POSTS_PER_CHANNEL_PER_WEEK for c in names}
     return names, per_channel
+
+
+def compute_balanced_distribution(
+    total_posts: int,
+    min_per_week: int = MIN_POSTS_PER_WEEK_DEFAULT,
+    max_per_week: int = MAX_POSTS_PER_WEEK_DEFAULT,
+    weeks: int = WEEKS_PER_PLAN,
+) -> List[int]:
+    """
+    Return a balanced distribution of posts across weeks (e.g. [3,3,3,3] for 12).
+    No week has 0 posts; respects min_per_week and max_per_week.
+    If total_posts=14, returns e.g. [3,4,3,4] or [4,3,4,3].
+    """
+    if total_posts < weeks * min_per_week or total_posts > weeks * max_per_week:
+        raise ValueError(
+            f"total_posts must be between {weeks * min_per_week} and {weeks * max_per_week}"
+        )
+    base, remainder = divmod(total_posts, weeks)
+    # Put remainder in first 'remainder' weeks (base+1 each), rest get base.
+    return [base + (1 if i < remainder else 0) for i in range(weeks)]

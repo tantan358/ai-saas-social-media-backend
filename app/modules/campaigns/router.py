@@ -11,6 +11,19 @@ from app.modules.campaigns.schemas import (
     GetPlanResponse,
     GeneratePlanRequest,
     GeneratePlanResponse,
+    ScheduleCampaignRequest,
+    ScheduleCampaignResponse,
+    ScheduleAutoResponse,
+    ScheduleByWeekResponse,
+    ScheduleByDateResponse,
+    ScheduleItemResponse,
+    PublicationWindowCreate,
+    PublicationWindowBulkCreate,
+    PublicationWindowResponse,
+    CampaignCalendarResponse,
+    CalendarByWeek,
+    CalendarByDate,
+    CalendarPostItem,
 )
 from app.modules.campaigns.service import CampaignService
 from app.dependencies import get_current_user, get_current_agency_id
@@ -110,8 +123,133 @@ def approve_plan(
     db: Session = Depends(get_db),
     agency_id: str = Depends(get_current_agency_id),
 ):
-    """Approve the monthly plan; all posts marked approved and editing locked."""
+    """Approve the monthly plan; all posts marked approved and editing locked. If plan uses auto_windowed scheduling, posts are assigned datetimes and campaign is marked scheduled."""
     return CampaignService.approve_plan(db, campaign_id, agency_id)
+
+
+@router.post("/{campaign_id}/schedule", response_model=ScheduleCampaignResponse)
+def schedule_campaign(
+    campaign_id: str,
+    body: Optional[ScheduleCampaignRequest] = Body(None),
+    db: Session = Depends(get_db),
+    agency_id: str = Depends(get_current_agency_id),
+):
+    """Assign scheduled_date, scheduled_time, scheduled_at to approved posts using publication windows; set status to scheduled. Use after approval (or for manual scheduling)."""
+    plan_start_date = body.plan_start_date if body else None
+    result = CampaignService.schedule_campaign(db, campaign_id, agency_id, plan_start_date)
+    return ScheduleCampaignResponse(
+        campaign_id=result["campaign_id"],
+        assigned_count=result["assigned_count"],
+        plan_start_date=result.get("plan_start_date"),
+        schedule_by_week=result.get("schedule_by_week", {}),
+    )
+
+
+@router.post("/{campaign_id}/schedule-auto", response_model=ScheduleAutoResponse)
+def schedule_auto_campaign(
+    campaign_id: str,
+    body: Optional[ScheduleCampaignRequest] = Body(None),
+    db: Session = Depends(get_db),
+    agency_id: str = Depends(get_current_agency_id),
+):
+    """Auto-schedule approved_final posts using publication windows and balanced distribution. Returns schedule grouped by week and by date."""
+    plan_start_date = body.plan_start_date if body else None
+    result = CampaignService.schedule_auto_campaign(db, campaign_id, agency_id, plan_start_date)
+    by_week = [
+        ScheduleByWeekResponse(
+            week=x["week"],
+            by_date=[ScheduleByDateResponse(date=bd["date"], posts=[ScheduleItemResponse(**p) for p in bd["posts"]]) for bd in x["by_date"]],
+        )
+        for x in result.get("by_week", [])
+    ]
+    by_date = [
+        ScheduleByDateResponse(date=bd["date"], posts=[ScheduleItemResponse(**p) for p in bd["posts"]])
+        for bd in result.get("by_date", [])
+    ]
+    return ScheduleAutoResponse(
+        campaign_id=result["campaign_id"],
+        assigned_count=result["assigned_count"],
+        plan_start_date=result.get("plan_start_date"),
+        by_week=by_week,
+        by_date=by_date,
+    )
+
+
+@router.get("/{campaign_id}/calendar", response_model=CampaignCalendarResponse)
+def get_campaign_calendar(
+    campaign_id: str,
+    db: Session = Depends(get_db),
+    agency_id: str = Depends(get_current_agency_id),
+):
+    """Get campaign calendar: posts grouped by week and by date; includes platform, title, status, client, campaign."""
+    data = CampaignService.get_campaign_calendar(db, campaign_id, agency_id)
+    by_week = [
+        CalendarByWeek(
+            week=x["week"],
+            by_date=[CalendarByDate(date=bd["date"], posts=[CalendarPostItem(**p) for p in bd["posts"]]) for bd in x["by_date"]],
+        )
+        for x in data["by_week"]
+    ]
+    by_date = [
+        CalendarByDate(date=bd["date"], posts=[CalendarPostItem(**p) for p in bd["posts"]])
+        for bd in data["by_date"]
+    ]
+    return CampaignCalendarResponse(
+        campaign_id=data["campaign_id"],
+        campaign_name=data.get("campaign_name"),
+        client_name=data.get("client_name"),
+        by_week=by_week,
+        by_date=by_date,
+    )
+
+
+@router.get("/{campaign_id}/publication-windows", response_model=List[PublicationWindowResponse])
+def get_publication_windows(
+    campaign_id: str,
+    db: Session = Depends(get_db),
+    agency_id: str = Depends(get_current_agency_id),
+):
+    """List publication windows for this campaign."""
+    windows = CampaignService.get_publication_windows(db, campaign_id, agency_id)
+    return [
+        PublicationWindowResponse(
+            id=w.id,
+            campaign_id=w.campaign_id,
+            platform=w.platform.value if hasattr(w.platform, "value") else str(w.platform),
+            day_of_week=w.day_of_week.value if hasattr(w.day_of_week, "value") else str(w.day_of_week),
+            start_time=w.start_time,
+            end_time=w.end_time,
+            priority=w.priority,
+            is_active=w.is_active,
+            created_at=w.created_at,
+        )
+        for w in windows
+    ]
+
+
+@router.post("/{campaign_id}/publication-windows", response_model=List[PublicationWindowResponse], status_code=status.HTTP_201_CREATED)
+def save_publication_windows(
+    campaign_id: str,
+    body: PublicationWindowBulkCreate,
+    db: Session = Depends(get_db),
+    agency_id: str = Depends(get_current_agency_id),
+):
+    """Save custom publication windows for this campaign (replaces existing)."""
+    created = CampaignService.save_publication_windows(db, campaign_id, agency_id, body.windows)
+    return [
+        PublicationWindowResponse(
+            id=w.id,
+            campaign_id=w.campaign_id,
+            platform=w.platform.value if hasattr(w.platform, "value") else str(w.platform),
+            day_of_week=w.day_of_week.value if hasattr(w.day_of_week, "value") else str(w.day_of_week),
+            start_time=w.start_time,
+            end_time=w.end_time,
+            priority=w.priority,
+            is_active=w.is_active,
+            created_at=w.created_at,
+        )
+        for w in created
+    ]
 
 
 @router.post("/{campaign_id}/reset-plan", response_model=CampaignResponse)
