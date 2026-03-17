@@ -40,7 +40,11 @@ from app.modules.campaigns.constants import (
     MIN_POSTS_PER_WEEK_DEFAULT,
     MAX_POSTS_PER_WEEK_DEFAULT,
 )
-from app.modules.scheduling.services.window_scheduler import assign_dates_and_times_for_campaign
+from app.modules.scheduling.services.window_scheduler import (
+    assign_dates_and_times_for_campaign,
+    NoPublicationWindowsError,
+    NoApprovedPostsError,
+)
 from app.modules.clients.models import Client
 from app.modules.agencies.models import Agency
 from fastapi import HTTPException, status
@@ -96,7 +100,13 @@ class CampaignService:
                     week_number=p.week_number,
                     title=p.title,
                     content=p.content,
-                    platform=p.platform.value if p.platform else None,
+                    platform=(
+                        p.platform.value
+                        if hasattr(p.platform, "value")
+                        else str(p.platform)
+                        if p.platform
+                        else None
+                    ),
                     status=p.status,
                     hashtags=getattr(p, "hashtags", None),
                     link=getattr(p, "link", None),
@@ -529,15 +539,30 @@ class CampaignService:
             CampaignStatus.PLANNING_APPROVED,
             CampaignStatus.SCHEDULED,
         ):
+            # Business rule: campaign must be in a valid state for auto-scheduling
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Campaign planning must be approved before auto-scheduling.",
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Campaign is not in a valid status for auto-scheduling.",
             )
         try:
             result = assign_dates_and_times_for_campaign(
                 db, campaign_id, plan_start_date=plan_start_date
             )
+        except NoApprovedPostsError as e:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e),
+            )
+        except NoPublicationWindowsError as e:
+            # No windows at all (custom or default) for at least one platform
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e),
+            )
         except ValueError as e:
+            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),
@@ -576,6 +601,62 @@ class CampaignService:
         return result
 
     @staticmethod
+    def schedule_auto_campaign_debug(
+        db: Session,
+        campaign_id: str,
+        agency_id: str,
+        plan_start_date: Optional[date] = None,
+    ) -> dict[str, Any]:
+        """
+        Debug helper: run auto-scheduling and return detailed diagnostics, including:
+        - campaign status
+        - post counts and platform grouping
+        - window usage (custom vs default)
+        - schedule grouped by week/date
+        """
+        from app.modules.campaigns.models import Post, PostStatus
+
+        campaign = CampaignService.get_campaign(db, campaign_id, agency_id)
+        posts = (
+            db.query(Post)
+            .filter(Post.campaign_id == campaign_id)
+            .all()
+        )
+        total_posts = len(posts)
+        approved_posts = [p for p in posts if p.status == PostStatus.APPROVED_FINAL]
+        by_platform: dict[str, int] = {}
+        for p in posts:
+            plat = p.platform.value if hasattr(p.platform, "value") else str(p.platform) if p.platform else "unknown"
+            by_platform[plat] = by_platform.get(plat, 0) + 1
+
+        debug: dict[str, Any] = {
+            "campaign_id": campaign_id,
+            "campaign_status": campaign.status.value if hasattr(campaign.status, "value") else str(campaign.status),
+            "total_posts": total_posts,
+            "approved_final_count": len(approved_posts),
+            "posts_by_platform": by_platform,
+        }
+
+        try:
+            result = CampaignService.schedule_auto_campaign(
+                db, campaign_id, agency_id, plan_start_date
+            )
+        except HTTPException as exc:
+            debug["success"] = False
+            debug["error"] = {
+                "status_code": exc.status_code,
+                "detail": exc.detail,
+            }
+            return debug
+
+        debug["success"] = True
+        debug["assigned_count"] = result.get("assigned_count", 0)
+        debug["window_usage"] = result.get("window_usage", {})
+        debug["by_week"] = result.get("by_week", [])
+        debug["by_date"] = result.get("by_date", [])
+        return debug
+
+    @staticmethod
     def get_campaign_calendar(
         db: Session,
         campaign_id: str,
@@ -592,7 +673,13 @@ class CampaignService:
         for p in posts:
             item = {
                 "post_id": p.id,
-                "platform": p.platform.value if p.platform else None,
+                "platform": (
+                    p.platform.value
+                    if hasattr(p.platform, "value")
+                    else str(p.platform)
+                    if p.platform
+                    else None
+                ),
                 "title": p.title,
                 "status": p.status.value if hasattr(p.status, "value") else str(p.status),
                 "week_number": p.week_number,

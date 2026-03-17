@@ -11,12 +11,25 @@ Rules:
 
 from __future__ import annotations
 
+import logging
 import random
 from datetime import date, time, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from sqlalchemy import text
+
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
+
+class NoPublicationWindowsError(ValueError):
+    """Raised when no publication windows (custom or default) exist for a platform."""
+
+
+class NoApprovedPostsError(ValueError):
+    """Raised when no approved_final posts exist to schedule for a campaign."""
 
 # Default sample windows: (day_of_week, start_time, end_time)
 # Times are naive; we combine with UTC dates.
@@ -175,11 +188,13 @@ def assign_dates_and_times_for_campaign(
                 posts.append(p)
 
     if not posts:
-        return {
-            "campaign_id": campaign_id,
-            "assigned_count": 0,
-            "schedule_by_week": {1: [], 2: [], 3: [], 4: []},
-        }
+        logger.info(
+            "No approved_final posts to auto-schedule for campaign.",
+            extra={"campaign_id": campaign_id},
+        )
+        raise NoApprovedPostsError(
+            "Cannot auto schedule because no approved_final posts exist for this campaign."
+        )
 
     # Load publication_windows for this campaign (may be empty -> use defaults)
     db_windows_list = (
@@ -191,43 +206,131 @@ def assign_dates_and_times_for_campaign(
         .all()
     )
 
-    def windows_for_platform(platform_value) -> list[tuple[str, time, time, str | None]]:
-        """Return list of (day_of_week, start_time, end_time, window_id)."""
-        platform_str = platform_value.value if hasattr(platform_value, "value") else str(platform_value)
+    # Detect if scheduling_logs table exists so we can safely write logs;
+    # if not present (e.g. migrations not yet applied), we skip log writes
+    logging_enabled = True
+    try:
+        db.execute(text("SELECT 1 FROM scheduling_logs LIMIT 1"))
+    except Exception:
+        logging_enabled = False
+        logger.warning(
+            "Scheduling logs table not available; skipping scheduling audit logs.",
+            extra={"campaign_id": campaign_id},
+        )
+
+    # Track which platforms used custom vs default windows for observability
+    window_usage: dict[str, dict[str, bool]] = {}
+
+    def get_effective_windows(
+        platform_value,
+    ) -> list[tuple[str, time, time, str | None]]:
+        """
+        Resolve effective windows for a platform:
+        1) campaign-specific windows if present and valid
+        2) otherwise, default windows by platform
+        Raises NoPublicationWindowsError if none exist at all.
+        """
+        platform_str = (
+            platform_value.value if hasattr(platform_value, "value") else str(platform_value)
+        )
         campaign_windows = [
             w
             for w in db_windows_list
-            if (w.platform.value == platform_str if hasattr(w.platform, "value") else str(w.platform) == platform_str)
+            if (
+                w.platform.value == platform_str
+                if hasattr(w.platform, "value")
+                else str(w.platform) == platform_str
+            )
         ]
+        has_custom = bool(campaign_windows)
         if campaign_windows:
-            return [
-                (
-                    w.day_of_week.value if hasattr(w.day_of_week, "value") else str(w.day_of_week),
-                    w.start_time,
-                    w.end_time,
-                    w.id,
-                )
-                for w in sorted(campaign_windows, key=lambda x: (x.day_of_week.value if hasattr(x.day_of_week, "value") else str(x.day_of_week), x.start_time or time(0))
-                )
-            ]
+            window_usage[platform_str] = {
+                "custom_windows": True,
+                "default_windows": False,
+            }
+            valid_windows = []
+            for w in campaign_windows:
+                if not (w.start_time and w.end_time):
+                    logger.warning(
+                        "Skipping publication window with null times.",
+                        extra={
+                            "campaign_id": campaign_id,
+                            "window_id": getattr(w, "id", None),
+                            "platform": platform_str,
+                        },
+                    )
+                    continue
+                valid_windows.append(w)
+            if valid_windows:
+                return [
+                    (
+                        w.day_of_week.value
+                        if hasattr(w.day_of_week, "value")
+                        else str(w.day_of_week),
+                        w.start_time,
+                        w.end_time,
+                        w.id,
+                    )
+                    for w in sorted(
+                        valid_windows,
+                        key=lambda x: (
+                            x.day_of_week.value
+                            if hasattr(x.day_of_week, "value")
+                            else str(x.day_of_week),
+                            x.start_time or time(0),
+                        ),
+                    )
+                ]
+            # No usable custom windows; fall through to defaults
+            has_custom = False
+
         defaults = get_default_windows_for_platform(platform_str)
-        return [(w["day_of_week"], w["start_time"], w["end_time"], None) for w in defaults]
+        if defaults:
+            window_usage[platform_str] = {
+                "custom_windows": has_custom,
+                "default_windows": True,
+            }
+            return [
+                (w["day_of_week"], w["start_time"], w["end_time"], None) for w in defaults
+            ]
+
+        # No custom or default windows at all for this platform
+        window_usage.setdefault(
+            platform_str,
+            {"custom_windows": has_custom, "default_windows": False},
+        )
+        logger.warning(
+            "No publication windows configured for platform.",
+            extra={
+                "campaign_id": campaign_id,
+                "platform": platform_str,
+            },
+        )
+        raise NoPublicationWindowsError(
+            f"Cannot auto schedule because no publication windows are configured for platform {platform_str}"
+        )
 
     # Group posts by (week_number, platform) to spread across windows
     by_week_platform: dict[tuple[int, str], list[Post]] = {}
     for p in posts:
-        platform_str = p.platform.value if p.platform else "linkedin"
+        platform_str = (
+            p.platform.value
+            if hasattr(p.platform, "value")
+            else str(p.platform)
+            if p.platform
+            else "linkedin"
+        )
         key = (p.week_number, platform_str)
         by_week_platform.setdefault(key, []).append(p)
 
     tz = timezone.utc
     schedule_by_week: dict[int, list[dict]] = {1: [], 2: [], 3: [], 4: []}
-    used_minutes_per_day: dict[tuple[int, date, str], set[int]] = {}  # (week, date, platform) -> set of minute-of-day
+    used_minutes_per_day: dict[
+        tuple[int, date, str], set[int]
+    ] = {}  # (week, date, platform) -> set of minute-of-day
 
     for (week_num, platform_str), group in sorted(by_week_platform.items()):
-        windows = windows_for_platform(platform_str)
-        if not windows:
-            continue
+        windows = get_effective_windows(platform_str)
         W = len(windows)
         group_sorted = sorted(group, key=lambda p: p.id)
         N = len(group_sorted)
@@ -266,41 +369,85 @@ def assign_dates_and_times_for_campaign(
             post.scheduling_window_id = window_id
             post.status = PostStatus.SCHEDULED
 
-            schedule_by_week[week_num].append({
+            schedule_entry = {
                 "post_id": post.id,
                 "platform": platform_str,
                 "scheduled_at": dt.isoformat(),
                 "scheduled_date": dt.date().isoformat(),
                 "day_of_week": day_of_week,
                 "title": getattr(post, "title", None),
-                "status": post.status.value if hasattr(post.status, "value") else str(post.status),
-            })
+                "status": post.status.value
+                if hasattr(post.status, "value")
+                else str(post.status),
+            }
+            schedule_by_week[week_num].append(schedule_entry)
 
-            log = SchedulingLog(
-                campaign_id=campaign_id,
-                post_id=post.id,
-                scheduled_at=dt,
-                window_id=window_id,
-                scheduling_reason="auto_windowed",
+            logger.info(
+                "Auto-scheduled post.",
+                extra={
+                    "campaign_id": campaign_id,
+                    "post_id": post.id,
+                    "platform": platform_str,
+                    "week_number": week_num,
+                    "scheduled_at": schedule_entry["scheduled_at"],
+                    "scheduled_date": schedule_entry["scheduled_date"],
+                    "day_of_week": day_of_week,
+                    "used_custom_windows": window_usage.get(platform_str, {}).get(
+                        "custom_windows", False
+                    ),
+                    "used_default_windows": window_usage.get(platform_str, {}).get(
+                        "default_windows", False
+                    ),
+                },
             )
-            db.add(log)
+
+            if logging_enabled:
+                log = SchedulingLog(
+                    campaign_id=campaign_id,
+                    post_id=post.id,
+                    scheduled_at=dt,
+                    window_id=window_id,
+                    scheduling_reason="auto_windowed",
+                )
+                db.add(log)
 
     # Validation: do not schedule all posts on the same day unless total_posts == 1
     if len(posts) > 1:
         distinct_dates = {p.scheduled_date for p in posts if p.scheduled_date}
         if len(distinct_dates) < 2:
             db.rollback()
+            logger.warning(
+                "Scheduling would assign all posts to the same day.",
+                extra={
+                    "campaign_id": campaign_id,
+                    "total_posts": len(posts),
+                    "distinct_dates": [d.isoformat() for d in distinct_dates],
+                },
+            )
             raise ValueError(
                 "Scheduling would assign all posts to the same day. "
                 "Ensure multiple publication windows across different days."
             )
 
     db.commit()
+    logger.info(
+        "Completed auto-scheduling for campaign.",
+        extra={
+            "campaign_id": campaign_id,
+            "approved_posts_count": len(posts),
+            "assigned_count": len(
+                [p for p in posts if p.scheduled_date and p.scheduled_at]
+            ),
+            "plan_start_date": plan_start_date.isoformat(),
+            "window_usage": window_usage,
+        },
+    )
     return {
         "campaign_id": campaign_id,
         "assigned_count": len(posts),
         "plan_start_date": plan_start_date.isoformat(),
         "schedule_by_week": schedule_by_week,
+        "window_usage": window_usage,
     }
 
 

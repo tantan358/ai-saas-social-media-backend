@@ -175,6 +175,19 @@ def schedule_auto_campaign(
     )
 
 
+@router.get("/{campaign_id}/schedule-auto-debug")
+def schedule_auto_campaign_debug(
+    campaign_id: str,
+    db: Session = Depends(get_db),
+    agency_id: str = Depends(get_current_agency_id),
+):
+    """
+    Debug endpoint: run auto-scheduling for a campaign and return detailed diagnostics
+    without relying on the frontend UI.
+    """
+    return CampaignService.schedule_auto_campaign_debug(db, campaign_id, agency_id, None)
+
+
 @router.get("/{campaign_id}/calendar", response_model=CampaignCalendarResponse)
 def get_campaign_calendar(
     campaign_id: str,

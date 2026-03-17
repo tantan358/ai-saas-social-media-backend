@@ -109,8 +109,10 @@ class PublicationWindow(Base):
 
     id = Column(CHAR(36), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
     campaign_id = Column(CHAR(36), ForeignKey("campaigns.id"), nullable=False, index=True)
-    platform = Column(Enum(PostPlatform), nullable=False)
-    day_of_week = Column(Enum(DayOfWeek), nullable=False)
+    # Store platform as plain string to avoid ENUM lookup issues between DB and SQLAlchemy
+    platform = Column(String(50), nullable=False)
+    # Store day_of_week as plain string (e.g. "monday") to avoid ENUM mismatches with existing data
+    day_of_week = Column(String(50), nullable=False)
     start_time = Column(Time, nullable=False)
     end_time = Column(Time, nullable=False)
     priority = Column(Integer, default=1, nullable=False)
@@ -142,7 +144,8 @@ class Post(Base):
     hashtags = Column(String(500), nullable=True)
     link = Column(String(2048), nullable=True)
     status = Column(Enum(PostStatus), default=PostStatus.GENERATED, nullable=False)
-    platform = Column(Enum(PostPlatform), nullable=True)  # linkedin | instagram
+    # Store platform as plain string to avoid ENUM lookup mismatch; use PostPlatform for validation in code
+    platform = Column(String(50), nullable=True)  # linkedin | instagram
     content_objective = Column(String(50), nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)
     scheduled_date = Column(Date, nullable=True)
