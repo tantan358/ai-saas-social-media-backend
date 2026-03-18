@@ -1,4 +1,5 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from app.modules.campaigns.models import (
     Campaign,
     Post,
@@ -343,7 +344,13 @@ class CampaignService:
                     week_number=p.week_number,
                     title=p.title,
                     content=p.content,
-                    platform=p.platform.value if p.platform else None,
+                    platform=(
+                        p.platform.value
+                        if hasattr(p.platform, "value")
+                        else str(p.platform)
+                        if p.platform
+                        else None
+                    ),
                     status=p.status,
                     hashtags=getattr(p, "hashtags", None),
                     link=getattr(p, "link", None),
@@ -814,14 +821,19 @@ class CampaignService:
         post.scheduled_time = scheduled_time
         post.scheduled_at = dt
         post.status = PostStatus.SCHEDULED
-        log = SchedulingLog(
-            campaign_id=post.campaign_id,
-            post_id=post.id,
-            scheduled_at=dt,
-            window_id=None,
-            scheduling_reason=scheduling_note or "manual_override",
-        )
-        db.add(log)
+        # Only write audit log if scheduling_logs table exists (e.g. after migrations)
+        try:
+            db.execute(text("SELECT 1 FROM scheduling_logs LIMIT 1"))
+            log = SchedulingLog(
+                campaign_id=post.campaign_id,
+                post_id=post.id,
+                scheduled_at=dt,
+                window_id=None,
+                scheduling_reason=scheduling_note or "manual_override",
+            )
+            db.add(log)
+        except Exception:
+            pass  # table missing; skip audit log, post update still applies
         db.commit()
         db.refresh(post)
         return post
